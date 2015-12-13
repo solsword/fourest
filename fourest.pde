@@ -10,19 +10,40 @@ Perlin pnl = new Perlin(this);
 double EVAPORATION_THRESHOLD = 0.00001;
 double LIQUID_DISPLAY_THRESHOLD = 0.1;
 
-// Note: the should give a parabola that intersects (0, 0)...
-float JUMP_PARABOLA_A = 0.25;
-float JUMP_PARABOLA_X = 2.0;
-float JUMP_PARABOLA_Y = 2.0;
+float AI_CLOCK_MAX = 3600.0;
+float AI_SLOW_UPDATE_DURATION = 0.3;
 
-float JUMP_MAX_DIST = 6.0;
+float VEL_DRIFT_THRESHOLD = 0.05;
+
+float SUPPORT_FUDGE_FACTOR = 0.005;
+float COLLISION_OFFSET = 0.0001;
+
+float JUMP_IMPULSE = 30.0;
+float JUMP_COOLDOWN = 0.2;
+
+float DEFAULT_MAX_SPEED = 15.0;
+
+float SWIM_ACCEL = 0.4;
+float CLIMB_ACCEL = 0.8;
+float WALK_ACCEL = 0.6;
+float JUMP_ACCEL = 0.1;
+
+float GRAVITY = 180.0;
+float SWIM_GRAVITY = 50.0;
+
+
+float DEFAULT_SIZE = 0.3;
 
 int WINDOW_WIDTH, WINDOW_HEIGHT;
 
 //int FRAME_RATE = 8;
 //int UPDATE_RATE = 4;
 
-int FRAME_RATE = 32;
+int FRAME_RATE = 60;
+int FRAME_COUNT = 0;
+int LAST_TIME = 0;
+int TIME_ELAPSED = 0;
+float REAL_FRAMERATE = 0;
 int UPDATE_RATE = 4;
 
 boolean PAUSED = true;
@@ -31,13 +52,16 @@ boolean PAUSED = true;
 float TEXT_SIZE = 18;
 
 int N_TILES = 8;
-int TILE_SIZE = 6;
+//int TILE_SIZE = 6;
+int TILE_SIZE = 16;
 //int TILE_SIZE = 128;
 
 color TILES[];
 
-int BOARD_WIDTH = 128;
-int BOARD_HEIGHT = 128;
+//int BOARD_WIDTH = 128;
+//int BOARD_HEIGHT = 128;
+int BOARD_WIDTH = 54;
+int BOARD_HEIGHT = 54;
 //int BOARD_WIDTH = 8;
 //int BOARD_HEIGHT = 8;
 
@@ -48,6 +72,8 @@ double ORANGE_FLOW[];
 double FLUX[];
 
 Agent LOST;
+
+float JUMP_PATH_PENALTY = 0.1;
 
 double MAX_COMPRESSED_FLOW = 1.1;
 double FLOW_BALANCING_SPEED = 0.99;
@@ -67,11 +93,16 @@ int MOV_SWIM = 2;
 int MOV_CLIMB = 3;
 
 int AI_NONE = 0;
+int AI_FOLLOW_CURSOR = 1;
+int AI_PLAYER_CONTROLLED = 2;
 
-int UP = 1;
-int RIGHT = 2;
-int DOWN = 4;
-int LEFT = 8;
+int DIR_UP = 1;
+int DIR_RIGHT = 2;
+int DIR_DOWN = 4;
+int DIR_LEFT = 8;
+
+int PLAYER_STEERING = 0;
+boolean PLAYER_DO_JUMP = false;
 
 float pnoise(float x, float y) {
   float[] xy = new float[2];
@@ -149,13 +180,13 @@ class Index {
   }
 
   Index neighbor(int direction) {
-    if (direction == UP) {
+    if (direction == DIR_UP) {
       return new Index(this.x, this.y - 1);
-    } else if (direction == RIGHT) {
+    } else if (direction == DIR_RIGHT) {
       return new Index(this.x + 1, this.y);
-    } else if (direction == DOWN) {
+    } else if (direction == DIR_DOWN) {
       return new Index(this.x, this.y + 1);
-    } else if (direction == LEFT) {
+    } else if (direction == DIR_LEFT) {
       return new Index(this.x - 1, this.y);
     }
     println("Error: bad direction in Index.neighbor: ", direction);
@@ -457,45 +488,81 @@ class Triangle {
 
 class Agent {
   public float x, y;
+  public float vx, vy;
+  public float speed, heading;
+  public float max_speed;
   public float size;
   public int AI;
-  Agent(float x, float y, float size, int AI) {
+  public float clock;
+  public float last_jump;
+  public ArrayList<PathIndex> current_path;
+  public int path_index;
+  public PathIndex jump_target;
+  Agent(float x, float y, float max_speed, float size, int AI) {
     if (x < 0) { x = 0; }
     if (x > BOARD_WIDTH) { x = BOARD_WIDTH; }
     if (y < 0) { y = 0; }
     if (y > BOARD_HEIGHT) { y = BOARD_HEIGHT; }
     this.x = x;
     this.y = y;
+    this.vx = 0;
+    this.vy = 0;
+    this.speed = 0;
+    this.heading = 0;
+    this.max_speed = max_speed;
     this.size = size;
     this.AI = AI;
+    this.clock = 0;
+    this.last_jump = -1;
+    this.current_path = null;
+    this.path_index = 0;
+    this.jump_target = null;
   }
 
   Agent(Agent o) {
     this.x = o.x;
     this.y = o.y;
+    this.vx = o.vx;
+    this.vy = o.vy;
+    this.speed = o.speed;
+    this.heading = o.heading;
+    this.max_speed = o.max_speed;
+    this.size = o.size;
     this.AI = o.AI;
+    this.clock = o.clock;
+    this.last_jump = o.last_jump;
+    this.current_path = o.current_path;
+    this.path_index = o.path_index;
+    this.jump_target = o.jump_target;
   }
 
   Agent clone() {
-    return new Agent(this.x, this.y, this.size, this.AI);
+    return new Agent(this);
   }
 
   Index center() {
     return new Index((int) this.x, (int) this.y);
   }
 
-  float dist_to(int direction) {
+  float dist_to_center(Index i) {
+    return sqrt(
+      pow((float) (i.x + 0.5 - this.x), 2.0)
+    + pow((float) (i.y + 0.5 - this.y), 2.0)
+    );
+  }
+
+  float dist_from_edge(int direction) {
     Index c = this.center();
-    if (direction == UP) {
-      return this.y - (c.y / ((float) BOARD_HEIGHT));
-    } else if (direction == DOWN) {
-      return ((c.y + 1) / ((float) BOARD_HEIGHT)) - this.y;
-    } else if (direction == RIGHT) {
-      return ((c.x + 1) / ((float) BOARD_WIDTH)) - this.x;
-    } else if (direction == LEFT) {
-      return this.x - (c.x / ((float) BOARD_WIDTH));
+    if (direction == DIR_UP) {
+      return this.y - c.y;
+    } else if (direction == DIR_DOWN) {
+      return (c.y + 1) - this.y;
+    } else if (direction == DIR_RIGHT) {
+      return (c.x + 1) - this.x;
+    } else if (direction == DIR_LEFT) {
+      return this.x - c.x;
     }
-    println("ERROR: invalid direction in Agent.dist_to\n");
+    println("ERROR: invalid direction in Agent.dist_from_edge\n");
     return -1;
   }
 
@@ -523,7 +590,7 @@ class Agent {
 
   int movement_mode(int direction) {
     Index c = this.center();
-    if (this.dist_to(direction) <= this.size) {
+    if (this.dist_from_edge(direction) <= this.size) {
       return this.movement_on(BOARD[c.neighbor(direction).idx()]);
     } else {
       return this.movement_on(BOARD[c.idx()]);
@@ -534,7 +601,7 @@ class Agent {
     Index c = this.center();
     int mov;
     boolean result = false;
-    if (this.dist_to(direction) <= this.size) {
+    if (this.dist_from_edge(direction) <= this.size + SUPPORT_FUDGE_FACTOR) {
       mov = this.movement_on(BOARD[c.neighbor(direction).idx()]);
       if (
          mov == MOV_BLOCKED
@@ -596,79 +663,280 @@ class Agent {
     ) {
       neighbors.add(
         new PathIndex(
-          here.neighbor(UP),
+          here.neighbor(DIR_UP),
           here.pathCost + 1,
-          here.neighbor(UP).dist_to(destination),
+          here.neighbor(DIR_UP).dist_to(destination),
           here
         )
       );
       neighbors.add(
         new PathIndex(
-          here.neighbor(DOWN),
+          here.neighbor(DIR_DOWN),
           here.pathCost + 1,
-          here.neighbor(DOWN).dist_to(destination),
+          here.neighbor(DIR_DOWN).dist_to(destination),
           here
         )
       );
       neighbors.add(
         new PathIndex(
-          here.neighbor(LEFT),
+          here.neighbor(DIR_LEFT),
           here.pathCost + 1,
-          here.neighbor(LEFT).dist_to(destination),
+          here.neighbor(DIR_LEFT).dist_to(destination),
           here
         )
       );
       neighbors.add(
         new PathIndex(
-          here.neighbor(RIGHT),
+          here.neighbor(DIR_RIGHT),
           here.pathCost + 1,
-          here.neighbor(RIGHT).dist_to(destination),
+          here.neighbor(DIR_RIGHT).dist_to(destination),
           here
         )
       );
+      // Jumping upwards:
+      mov = this.movement_on(BOARD[here.neighbor(DIR_UP).idx()]);
+      if (mov == MOV_NORMAL) {
+        neighbors.add(
+          new PathIndex(
+            here.neighbor(DIR_UP).neighbor(DIR_UP),
+            here.pathCost + 2 + JUMP_PATH_PENALTY,
+            here.neighbor(DIR_UP).neighbor(DIR_UP).dist_to(destination),
+            here
+          )
+        );
+        neighbors.add(
+          new PathIndex(
+            here.neighbor(DIR_UP).neighbor(DIR_RIGHT),
+            here.pathCost + 2 + JUMP_PATH_PENALTY,
+            here.neighbor(DIR_UP).neighbor(DIR_RIGHT).dist_to(destination),
+            here
+          )
+        );
+        neighbors.add(
+          new PathIndex(
+            here.neighbor(DIR_UP).neighbor(DIR_LEFT),
+            here.pathCost + 2 + JUMP_PATH_PENALTY,
+            here.neighbor(DIR_UP).neighbor(DIR_LEFT).dist_to(destination),
+            here
+          )
+        );
+        mov = this.movement_on(
+          BOARD[here.neighbor(DIR_UP).neighbor(DIR_UP).idx()]
+        );
+        if (mov == MOV_NORMAL) {
+          neighbors.add(
+            new PathIndex(
+              here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_RIGHT),
+              here.pathCost + 3 + JUMP_PATH_PENALTY,
+              here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_RIGHT)
+                .dist_to(destination),
+              here
+            )
+          );
+          neighbors.add(
+            new PathIndex(
+              here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_LEFT),
+              here.pathCost + 3 + JUMP_PATH_PENALTY,
+              here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_LEFT)
+                .dist_to(destination),
+              here
+            )
+          );
+        }
+      }
     } else if (mov == MOV_NORMAL) {
-      mov = this.movement_on(BOARD[here.neighbor(DOWN).idx()]);
+      mov = this.movement_on(BOARD[here.neighbor(DIR_DOWN).idx()]);
       if (
          mov == MOV_BLOCKED
       || mov == MOV_CLIMB
-      || mov == MOV_SWIM
       ) { // supported: we can jump from here
-        // TODO: HERE
-        this.add_jump_possibilities(neighbors, here, destination);
+        // (restricted) Jumping possibilities:
+        neighbors.add(
+          new PathIndex(
+            here.neighbor(DIR_UP),
+            here.pathCost + 1,
+            here.neighbor(DIR_UP).dist_to(destination),
+            here
+          )
+        );
+        mov = this.movement_on(BOARD[here.neighbor(DIR_UP).idx()]);
+        if (mov == MOV_NORMAL) {
+          neighbors.add(
+            new PathIndex(
+              here.neighbor(DIR_UP).neighbor(DIR_UP),
+              here.pathCost + 2 + JUMP_PATH_PENALTY,
+              here.neighbor(DIR_UP).neighbor(DIR_UP).dist_to(destination),
+              here
+            )
+          );
+          neighbors.add(
+            new PathIndex(
+              here.neighbor(DIR_UP).neighbor(DIR_RIGHT),
+              here.pathCost + 2 + JUMP_PATH_PENALTY,
+              here.neighbor(DIR_UP).neighbor(DIR_RIGHT).dist_to(destination),
+              here
+            )
+          );
+          neighbors.add(
+            new PathIndex(
+              here.neighbor(DIR_UP).neighbor(DIR_LEFT),
+              here.pathCost + 2 + JUMP_PATH_PENALTY,
+              here.neighbor(DIR_UP).neighbor(DIR_LEFT).dist_to(destination),
+              here
+            )
+          );
+          mov = this.movement_on(
+            BOARD[here.neighbor(DIR_UP).neighbor(DIR_UP).idx()]
+          );
+          if (mov == MOV_NORMAL) {
+            neighbors.add(
+              new PathIndex(
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_RIGHT),
+                here.pathCost + 3 + JUMP_PATH_PENALTY,
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_RIGHT)
+                  .dist_to(destination),
+                here
+              )
+            );
+            neighbors.add(
+              new PathIndex(
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_LEFT),
+                here.pathCost + 3 + JUMP_PATH_PENALTY,
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_LEFT)
+                  .dist_to(destination),
+                here
+              )
+            );
+          }
+          mov = this.movement_on(
+            BOARD[here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_RIGHT)
+              .idx()]
+          );
+          if (mov == MOV_NORMAL) {
+            neighbors.add(
+              new PathIndex(
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_RIGHT)
+                  .neighbor(DIR_RIGHT),
+                here.pathCost + 4 + JUMP_PATH_PENALTY,
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_RIGHT)
+                  .neighbor(DIR_RIGHT).dist_to(destination),
+                here
+              )
+            );
+          }
+          mov = this.movement_on(
+            BOARD[here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_LEFT)
+              .idx()]
+          );
+          if (mov == MOV_NORMAL) {
+            neighbors.add(
+              new PathIndex(
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_LEFT)
+                  .neighbor(DIR_LEFT),
+                here.pathCost + 4 + JUMP_PATH_PENALTY,
+                here.neighbor(DIR_UP).neighbor(DIR_UP).neighbor(DIR_LEFT)
+                  .neighbor(DIR_LEFT).dist_to(destination),
+                here
+              )
+            );
+          }
+          mov = this.movement_on(
+            BOARD[here.neighbor(DIR_UP).neighbor(DIR_RIGHT).idx()]
+          );
+          if (mov == MOV_NORMAL) {
+            mov = this.movement_on(
+              BOARD[here.neighbor(DIR_UP).neighbor(DIR_RIGHT)
+                .neighbor(DIR_RIGHT).idx()]
+            );
+            if (mov == MOV_NORMAL) {
+              neighbors.add(
+                new PathIndex(
+                  here.neighbor(DIR_UP).neighbor(DIR_RIGHT).neighbor(DIR_RIGHT)
+                    .neighbor(DIR_RIGHT),
+                  here.pathCost + 4 + JUMP_PATH_PENALTY,
+                  here.neighbor(DIR_UP).neighbor(DIR_RIGHT).neighbor(DIR_RIGHT)
+                    .neighbor(DIR_RIGHT).dist_to(destination),
+                  here
+                )
+              );
+            }
+          }
+          mov = this.movement_on(
+            BOARD[here.neighbor(DIR_UP).neighbor(DIR_LEFT).idx()]
+          );
+          if (mov == MOV_NORMAL) {
+            mov = this.movement_on(
+              BOARD[here.neighbor(DIR_UP).neighbor(DIR_LEFT).neighbor(DIR_LEFT)
+                .idx()]
+            );
+            if (mov == MOV_NORMAL) {
+              neighbors.add(
+                new PathIndex(
+                  here.neighbor(DIR_UP).neighbor(DIR_LEFT).neighbor(DIR_LEFT)
+                    .neighbor(DIR_LEFT),
+                  here.pathCost + 4 + JUMP_PATH_PENALTY,
+                  here.neighbor(DIR_UP).neighbor(DIR_LEFT).neighbor(DIR_LEFT)
+                    .neighbor(DIR_LEFT).dist_to(destination),
+                  here
+                )
+              );
+            }
+          }
+        }
         // Walking possibilities:
         neighbors.add(
           new PathIndex(
-            here.neighbor(RIGHT),
+            here.neighbor(DIR_RIGHT),
             here.pathCost + 1,
-            here.neighbor(RIGHT).dist_to(destination),
+            here.neighbor(DIR_RIGHT).dist_to(destination),
             here
           )
         );
         neighbors.add(
           new PathIndex(
-            here.neighbor(LEFT),
+            here.neighbor(DIR_LEFT),
             here.pathCost + 1,
-            here.neighbor(LEFT).dist_to(destination),
+            here.neighbor(DIR_LEFT).dist_to(destination),
             here
           )
         );
         neighbors.add(
           new PathIndex(
-            here.neighbor(DOWN),
+            here.neighbor(DIR_DOWN),
             here.pathCost + 1,
-            here.neighbor(DOWN).dist_to(destination),
+            here.neighbor(DIR_DOWN).dist_to(destination),
             here
           )
         );
-      } else { // unsupported: we can only fall through
+      } else { // unsupported: we can only fall through or to a side...
         neighbors.add(
           new PathIndex(
-            here.neighbor(DOWN),
+            here.neighbor(DIR_DOWN),
             here.pathCost + 1,
-            here.neighbor(DOWN).dist_to(destination),
+            here.neighbor(DIR_DOWN).dist_to(destination),
             here
           )
         );
+        // TODO: How badly does this inaccuracy hurt us?
+        mov = this.movement_on(BOARD[here.neighbor(DIR_DOWN).idx()]);
+        if (mov == MOV_NORMAL) {
+          neighbors.add(
+            new PathIndex(
+              here.neighbor(DIR_DOWN).neighbor(DIR_RIGHT),
+              here.pathCost + 1.5,
+              here.neighbor(DIR_DOWN).neighbor(DIR_RIGHT).dist_to(destination),
+              here
+            )
+          );
+          neighbors.add(
+            new PathIndex(
+              here.neighbor(DIR_DOWN).neighbor(DIR_LEFT),
+              here.pathCost + 1.5,
+              here.neighbor(DIR_DOWN).neighbor(DIR_LEFT).dist_to(destination),
+              here
+            )
+          );
+        }
       }
     }
     // Add all detected neighbors to our open list:
@@ -677,8 +945,9 @@ class Agent {
       match = nbr.match_in(closed);
       if (match != -1) {
         if (nbr.cost() < closed.get(match).cost()) {
-          closed.get(match).pathCost = nbr.pathCost; // use the better costs
+          closed.get(match).pathCost = nbr.pathCost; // use the better path
           closed.get(match).heurCost = nbr.heurCost;
+          closed.get(match).from = nbr.from;
         } else {
           continue; // skip this one
         }
@@ -686,8 +955,9 @@ class Agent {
       match = nbr.match_in(open);
       if (match != -1) {
         if (nbr.cost() < open.get(match).cost()) {
-          open.get(match).pathCost = nbr.pathCost; // use the better costs
+          open.get(match).pathCost = nbr.pathCost; // use the better path
           open.get(match).heurCost = nbr.heurCost;
+          open.get(match).from = nbr.from;
         } else {
           continue; // skip this one
         }
@@ -696,176 +966,383 @@ class Agent {
     }
   }
 
-  void add_jump_possibilities(
-    ArrayList<PathIndex> add_to,
-    PathIndex here,
-    Index destination
-  ) {
-    Index current, next;
-    float x_dist;
-    ArrayList<Float> l_t = new ArrayList<Float>();
-    l_t.add(0.0);
-    int oy;
-    // Jumping left:
-    current = here;
-    x_dist = 0;
-    l_t.set(0, (float) current.x);
-    while (true) {
-      next = nextParabolicIndex(
-        JUMP_PARABOLA_A,
-        ((float) here.x) - JUMP_PARABOLA_X,
-        ((float) here.y) + JUMP_PARABOLA_Y,
-        current,
-        l_t,
-        true
-      );
-      if (
-         this.movement_on(BOARD[next.idx()]) == MOV_BLOCKED
-      || x_dist > JUMP_MAX_DIST
-      ) {
-        // Parabola is done: we hit a wall
-        break;
-      }
-      add_to.add(
-        new PathIndex(
-          next,
-          here.pathCost + x_dist,
-          next.dist_to(destination),
-          here
-        )
-      );
-      if (this.movement_on(BOARD[next.idx()]) != MOV_NORMAL) {
-        // We can get to this space but we need not consider spaces beyond it.
-        break;
-      }
-      x_dist += current.x - next.x;
-      current = next;
-    }
-    // Jumping up:
-    for (oy = 0; oy < JUMP_PARABOLA_Y; ++oy) {
-      next = new Index(here.x, here.y + oy);
-      add_to.add(
-        new PathIndex(
-          next,
-          here.pathCost + oy,
-          next.dist_to(destination),
-          here
-        )
-      );
-    }
-    // Jumping right:
-    current = here;
-    x_dist = 0;
-    l_t.set(0, (float) current.x);
-    while (true) {
-      next = nextParabolicIndex(
-        JUMP_PARABOLA_A,
-        ((float) here.x) + JUMP_PARABOLA_X,
-        ((float) here.y) + JUMP_PARABOLA_Y,
-        current,
-        l_t,
-        false
-      );
-      if (
-         this.movement_on(BOARD[next.idx()]) == MOV_BLOCKED
-      || x_dist > JUMP_MAX_DIST
-      ) {
-        // Parabola is done: we hit a wall
-        break;
-      }
-      add_to.add(
-        new PathIndex(
-          next,
-          here.pathCost + x_dist,
-          next.dist_to(destination),
-          here
-        )
-      );
-      if (this.movement_on(BOARD[next.idx()]) != MOV_NORMAL) {
-        // We can get to this space but we need not consider spaces beyond it.
-        break;
-      }
-      x_dist += next.x - current.x;
-      current = next;
-    }
-  }
-}
+  void update(float dt) {
+    int tile, tile_next;
+    float d_vx, d_vy;
+    float new_x, new_y;
+    float new_left, new_top, new_right, new_bot;
+    Index here;
+    PathIndex next;
+    int dir;
+    boolean can_jump = false, do_jump = false;
 
-// Supplies the next index entered by a parabola with equation:
-//   y = A*(x - X)^2 + Y
-// which is expressed parametrically as:
-//   x = t
-//   y = A*(t - X)^2 + Y
-// The arc is presumed to be travelling towards either t = infinity (reversed =
-// false) or t = -infinity (reversed = true). Quantization errors will occur as
-// t becomes large.
-Index nextParabolicIndex(
-  float A, float X, float Y,
-  Index current,
-  ArrayList<Float> l_t,
-  boolean reversed
-) {
-  Index result;
-  float x, y;
-  while (true) {
-    if (reversed) {
-      l_t.set(0, l_t.get(0) - 0.1);
+    this.clock += dt;
+    if (this.clock > AI_CLOCK_MAX) {
+      this.clock -= AI_CLOCK_MAX;
+    }
+
+    this.last_jump -= dt;
+    if (this.last_jump < 0) {
+      this.last_jump = 0;
+      can_jump = true;
+    }
+
+    // steer:
+    if (this.AI == AI_NONE) {
+      this.speed = 0;
+      // heading is unchanged
+    } else if (this.AI == AI_FOLLOW_CURSOR) {
+      if ( // every AI_SLOW_UPDATE_DURATION seconds or if we're off-path:
+         (
+            floor(this.clock / AI_SLOW_UPDATE_DURATION)
+         != floor((this.clock - dt) / AI_SLOW_UPDATE_DURATION)
+         )
+      || this.current_path == null
+      || !this.current_path.get(this.path_index).same_place(this.center())
+      ) {
+        // update our path...
+        this.current_path = this.path_to(mouse_index());
+        this.path_index = 0;
+      }
+      // Follow our current path or jump target:
+      tile = BOARD[this.center().idx()];
+      tile_next = BOARD[this.center().neighbor(DIR_DOWN).idx()];
+      if (this.current_path == null || this.current_path.size() <= 1) {
+        // stop if we have no path or have arrived:
+        this.speed *= 0.2;
+      } else if (
+         this.jump_target != null
+      && this.movement_on(tile) == MOV_NORMAL
+      && this.movement_on(tile_next) == MOV_NORMAL
+      ) {
+        // we're in the middle of a jump: just steer left/right towards our
+        // landing spot:
+        if (this.jump_target.x + 0.5 > this.x) {
+          this.heading = PI;
+        } else {
+          this.heading = 0;
+        }
+        this.speed = this.max_speed;
+        if (this.center().x == this.jump_target.x) {
+          // done with in-flight steering mode
+          this.jump_target = null;
+          this.speed = 0;
+        }
+      } else {
+        // otherwise full speed ahead towards the next cell in the path:
+        next = this.current_path.get(1);
+        if (
+           this.movement_on(tile) == MOV_NORMAL
+        && this.movement_on(tile_next) == MOV_NORMAL
+        ) {
+          // we're airborne: no need to accelerate downwards...
+          if (next.x > this.center().x) {
+            this.heading = PI;
+          } else if (next.x < this.center().x) {
+            this.heading = 0;
+          } else {
+            this.heading = PI/2.0;
+          }
+        } else { // just go towards the center of the next cell:
+          this.heading = atan2(
+            -(next.y + 0.5 - this.y),
+            -(next.x + 0.5 - this.x)
+          );
+        }
+        this.speed = this.max_speed;
+        tile = BOARD[this.center().idx()];
+        tile_next = BOARD[next.idx()];
+        /*
+        if (
+           (
+              this.movement_on(tile) == MOV_SWIM
+           || this.movement_on(tile) == MOV_CLIMB
+           )
+        && this.movement_on(tile_next) == MOV_NORMAL
+        ) {
+          // careful when exiting water/vines
+          this.speed = this.max_speed * 2.0 / 3.0;
+          this.heading = atan2(
+            -(next.y + 0.8 - this.y),
+            -(next.x + 0.5 - this.x)
+          );
+        }
+        // */
+        if (
+           // A cell that we have to jump to because it's far away:
+           (abs(next.x - this.center().x) + abs(next.y - this.center().y) > 1)
+           // jump one up on land:
+        || (
+              this.movement_on(tile) == MOV_NORMAL
+           && next.x == this.center().x
+           && next.y == this.center().y - 1
+           )
+           // jump out of water:
+        || (
+              (next.y == this.center().y - 1)
+           && this.movement_on(BOARD[next.idx()]) == MOV_NORMAL
+           && (
+                 this.movement_on(tile) == MOV_SWIM
+              || this.movement_on(tile) == MOV_CLIMB
+              )
+           )
+        ) {
+          // this is a jump...
+          this.jump_target = next;
+          if (
+             abs(this.x - (this.center().x + 0.5)) < 0.2
+          && this.supported(DIR_DOWN)
+          ) {
+            if (
+               this.movement_on(tile) == MOV_SWIM
+            || this.movement_on(tile) == MOV_SWIM
+            ) {
+              this.heading = PI/2.0;
+            } else if (next.x + 0.5 > this.x) {
+              this.heading = PI;
+            } else if (next.x + 0.5 < this.x) {
+              this.heading = 0;
+            }
+            this.speed = this.max_speed;
+            do_jump = true;
+          } else {
+            this.heading = atan2(
+              -(this.center().y + 0.5 - this.y),
+              -(this.center().x + 0.5 - this.x)
+            );
+            this.speed = this.max_speed;
+          }
+        }
+      }
+    } else if (this.AI == AI_PLAYER_CONTROLLED) {
+      d_vx = 0;
+      d_vy = 0;
+      if ((PLAYER_STEERING & DIR_UP) != 0) { d_vy += 1.0; }
+      if ((PLAYER_STEERING & DIR_DOWN) != 0) { d_vy -= 1.0; }
+      if ((PLAYER_STEERING & DIR_LEFT) != 0) { d_vx += 1.0; }
+      if ((PLAYER_STEERING & DIR_RIGHT) != 0) { d_vx -= 1.0; }
+      if (PLAYER_DO_JUMP) { do_jump = true; PLAYER_DO_JUMP = false; }
+      if (d_vx == 0 && d_vy == 0) {
+        this.speed = 0;
+      } else {
+        this.heading = atan2(d_vy, d_vx);
+        this.speed = this.max_speed;
+      }
+    }
+
+    // Simple "universal" navigation:
+    if (this.heading > -PI/4.0 && this.heading <= PI/4.0) {
+      dir = DIR_RIGHT;
+    } else if (this.heading > PI/4.0 && this.heading <= 3.0*PI/4.0) {
+      dir = DIR_UP;
+    } else if (this.heading > 3.0*PI/4.0 || this.heading <= -3.0*PI/4.0) {
+      dir = DIR_LEFT;
     } else {
-      l_t.set(0, l_t.get(0) + 0.1);
+      dir = DIR_DOWN;
     }
-    x = l_t.get(0);
-    y = A * pow((float) (x - X), 2.0) + Y;
-    result = new Index(x, y);
-    if (!result.equals(current)) {
-      return result;
+    if (this.movement_mode(dir) == MOV_BLOCKED) {
+      if (this.heading > 0) {
+        do_jump = true;
+      } else if (this.heading < -PI/2.0) {
+        this.heading = -PI;
+        dir = DIR_LEFT;
+      } else if (this.heading > -PI/2.0) {
+        this.heading = 0;
+        dir = DIR_RIGHT;
+      } // otherwise we're stuck...
     }
+
+    // Update based on desired velocity:
+    if (this.speed < VEL_DRIFT_THRESHOLD) {
+      this.speed = 0;
+    }
+    d_vx = -this.speed * cos(this.heading);
+    d_vy = -this.speed * sin(this.heading);
+
+    if (this.movement_mode(dir) == MOV_SWIM) {
+      this.vx = (1 - SWIM_ACCEL) * this.vx + SWIM_ACCEL * d_vx;
+      this.vy = (1 - SWIM_ACCEL) * this.vy + SWIM_ACCEL * d_vy;
+      this.vy += SWIM_GRAVITY * dt;
+    } else if (this.movement_mode(dir) == MOV_CLIMB) {
+      this.vx = (1 - CLIMB_ACCEL) * this.vx + CLIMB_ACCEL * d_vx;
+      this.vy = (1 - CLIMB_ACCEL) * this.vy + CLIMB_ACCEL * d_vy;
+      // no gravity
+    } else if (this.movement_mode(dir) == MOV_NORMAL) {
+      if (this.supported(DIR_DOWN)) {
+        this.vx = (1 - WALK_ACCEL) * this.vx + WALK_ACCEL * d_vx;
+      } else {
+        this.vx = (1 - JUMP_ACCEL) * this.vx + JUMP_ACCEL * d_vx;
+        this.vy += GRAVITY * dt;
+      }
+      // desired vy is not applied in MOV_NORMAL mode...
+    }
+    if (this.supported(DIR_DOWN) && can_jump && do_jump) {
+      this.vy -= JUMP_IMPULSE;
+      this.last_jump = JUMP_COOLDOWN;
+    }
+    new_x = this.x + this.vx * dt;
+    new_y = this.y + this.vy * dt;
+
+    // back-off if necessary (size had better be strictly < 0.5):
+    here = this.center();
+    new_top = new_y - this.size;
+    new_bot = new_y + this.size;
+    new_left = new_x - this.size;
+    new_right = new_x + this.size;
+    if (
+       new_top < here.y
+    && this.movement_on(BOARD[here.neighbor(DIR_UP).idx()]) == MOV_BLOCKED
+    ) {
+      new_y = here.y + this.size + COLLISION_OFFSET;
+      if (this.vy < 0) { this.vy = 0; }
+    }
+    if (
+       new_bot > here.y + 1
+    && this.movement_on(BOARD[here.neighbor(DIR_DOWN).idx()]) == MOV_BLOCKED
+    ) {
+      new_y = here.y + 1 - this.size - COLLISION_OFFSET;
+      if (this.vy > 0) { this.vy = 0; }
+    }
+    if (
+       new_left < here.x
+    && this.movement_on(BOARD[here.neighbor(DIR_LEFT).idx()]) == MOV_BLOCKED
+    ) {
+      new_x = here.x + this.size + COLLISION_OFFSET;
+      if (this.vx < 0) { this.vx = 0; }
+    }
+    if (
+       new_right > here.x + 1
+    && this.movement_on(BOARD[here.neighbor(DIR_RIGHT).idx()]) == MOV_BLOCKED
+    ) {
+      new_x = here.x + 1 - this.size - COLLISION_OFFSET;
+      if (this.vx > 0) { this.vx = 0; }
+    }
+    // Diagonals:
+    new_top = new_y - this.size;
+    new_bot = new_y + this.size;
+    new_left = new_x - this.size;
+    new_right = new_x + this.size;
+    if (
+       new_right > here.x + 1
+    && new_top < here.y
+    && this.movement_on(
+         BOARD[here.neighbor(DIR_UP).neighbor(DIR_RIGHT).idx()]
+       ) == MOV_BLOCKED
+    ) {
+      if (new_right - here.x + 1 > here.y - new_top) {
+        new_y = here.y + this.size;
+        if (this.vy < 0) { this.vy = 0; }
+      } else {
+        new_x = here.x + 1 - this.size;
+        if (this.vx > 0) { this.vx = 0; }
+      }
+    } else if (
+       new_left < here.x
+    && new_top < here.y
+    && this.movement_on(
+         BOARD[here.neighbor(DIR_UP).neighbor(DIR_LEFT).idx()]
+       ) == MOV_BLOCKED
+    ) {
+      if (here.x - new_left > here.y - new_top) {
+        new_y = here.y + this.size;
+        if (this.vy < 0) { this.vy = 0; }
+      } else {
+        new_x = here.x + this.size;
+        if (this.vx < 0) { this.vx = 0; }
+      }
+    } else if (
+       new_right > here.x + 1
+    && new_bot > here.y + 1
+    && this.movement_on(
+         BOARD[here.neighbor(DIR_DOWN).neighbor(DIR_RIGHT).idx()]
+       ) == MOV_BLOCKED
+    ) {
+      if (new_right - here.x + 1 > new_bot - here.y + 1) {
+        new_y = here.y + 1 - this.size;
+        if (this.vy > 0) { this.vy = 0; }
+      } else {
+        new_x = here.x + 1 - this.size;
+        if (this.vx > 0) { this.vx = 0; }
+      }
+    } else if (
+       new_left < here.x
+    && new_bot > here.y + 1
+    && this.movement_on(
+         BOARD[here.neighbor(DIR_DOWN).neighbor(DIR_LEFT).idx()]
+       ) == MOV_BLOCKED
+    ) {
+      if (here.x - new_left > new_bot - here.y + 1) {
+        new_y = here.y + 1 - this.size;
+        if (this.vy > 0) { this.vy = 0; }
+      } else {
+        new_x = here.x + this.size;
+        if (this.vx < 0) { this.vx = 0; }
+      }
+    }
+
+    this.x = new_x;
+    this.y = new_y;
+
+    // re-wrap coordinates:
+    while (this.x < 0) { this.x += BOARD_WIDTH; }
+    while (this.x > BOARD_WIDTH) { this.x -= BOARD_WIDTH; }
+    while (this.y < 0) { this.y += BOARD_HEIGHT; }
+    while (this.y > BOARD_HEIGHT) { this.y -= BOARD_HEIGHT; }
   }
 }
 
 int prev_dir(int direction) {
-  if (direction == UP) { return LEFT; }
-  else if (direction == LEFT) { return DOWN; }
-  else if (direction == DOWN) { return RIGHT; }
-  else if (direction == RIGHT) { return UP; }
+  if (direction == DIR_UP) { return DIR_LEFT; }
+  else if (direction == DIR_LEFT) { return DIR_DOWN; }
+  else if (direction == DIR_DOWN) { return DIR_RIGHT; }
+  else if (direction == DIR_RIGHT) { return DIR_UP; }
   println("Error: bad direction in prev_dir: ", direction);
-  return UP;
+  return DIR_UP;
 }
 
 int next_dir(int direction) {
-  if (direction == UP) { return RIGHT; }
-  else if (direction == RIGHT) { return DOWN; }
-  else if (direction == DOWN) { return LEFT; }
-  else if (direction == LEFT) { return UP; }
+  if (direction == DIR_UP) { return DIR_RIGHT; }
+  else if (direction == DIR_RIGHT) { return DIR_DOWN; }
+  else if (direction == DIR_DOWN) { return DIR_LEFT; }
+  else if (direction == DIR_LEFT) { return DIR_UP; }
   println("Error: bad direction in next_dir: ", direction);
-  return UP;
+  return DIR_UP;
 }
 
 int opp_dir(int direction) {
-  if (direction == UP) { return DOWN; }
-  else if (direction == RIGHT) { return LEFT; }
-  else if (direction == LEFT) { return RIGHT; }
-  else if (direction == DOWN) { return UP; }
+  if (direction == DIR_UP) { return DIR_DOWN; }
+  else if (direction == DIR_RIGHT) { return DIR_LEFT; }
+  else if (direction == DIR_LEFT) { return DIR_RIGHT; }
+  else if (direction == DIR_DOWN) { return DIR_UP; }
   println("Error: bad direction in opp_dir: ", direction);
-  return UP;
+  return DIR_UP;
 }
 
 boolean any_touching(Index i, int tile) {
-  if (BOARD[i.neighbor(UP).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(RIGHT).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(DOWN).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(LEFT).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(UP).neighbor(RIGHT).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(RIGHT).neighbor(DOWN).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(DOWN).neighbor(LEFT).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(LEFT).neighbor(UP).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_UP).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_RIGHT).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_DOWN).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_LEFT).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_UP).neighbor(DIR_RIGHT).idx()] == tile) {
+    return true;
+  }
+  if (BOARD[i.neighbor(DIR_RIGHT).neighbor(DIR_DOWN).idx()] == tile) {
+    return true;
+  }
+  if (BOARD[i.neighbor(DIR_DOWN).neighbor(DIR_LEFT).idx()] == tile) {
+    return true;
+  }
+  if (BOARD[i.neighbor(DIR_LEFT).neighbor(DIR_UP).idx()] == tile) {
+    return true;
+  }
   return false;
 }
 
 boolean any_adjacent(Index i, int tile) {
-  if (BOARD[i.neighbor(UP).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(RIGHT).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(DOWN).idx()] == tile) { return true; }
-  if (BOARD[i.neighbor(LEFT).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_UP).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_RIGHT).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_DOWN).idx()] == tile) { return true; }
+  if (BOARD[i.neighbor(DIR_LEFT).idx()] == tile) { return true; }
   return false;
 }
 
@@ -889,7 +1366,7 @@ void swap_from_next() {
   }
 }
 
-void update_blue() {
+void update_water() {
   Index i = new Index(0, 0);
   double flow_here, balance_level, space_above;
   double surplus, surplus_left, surplus_right;
@@ -912,22 +1389,22 @@ void update_blue() {
       flow_here = BLUE_FLOW[i.idx()];
       if (
          flow_here > 0
-      && BOARD[i.neighbor(DOWN).idx()] <= TILE_WATER
+      && BOARD[i.neighbor(DIR_DOWN).idx()] <= TILE_WATER
       ) { // can flow down
         if (
-          flow_here + BLUE_FLOW[i.neighbor(DOWN).idx()]
+          flow_here + BLUE_FLOW[i.neighbor(DIR_DOWN).idx()]
         < MAX_COMPRESSED_FLOW
         ) {
           FLUX[i.idx()] -= flow_here;
-          FLUX[i.neighbor(DOWN).idx()] += flow_here;
+          FLUX[i.neighbor(DIR_DOWN).idx()] += flow_here;
         } else {
           balance_level = (
             flow_here
-          + BLUE_FLOW[i.neighbor(DOWN).idx()]
+          + BLUE_FLOW[i.neighbor(DIR_DOWN).idx()]
           - MAX_COMPRESSED_FLOW
           );
           FLUX[i.idx()] -= flow_here - balance_level;
-          FLUX[i.neighbor(DOWN).idx()] += flow_here - balance_level;
+          FLUX[i.neighbor(DIR_DOWN).idx()] += flow_here - balance_level;
         }
       }
     }
@@ -943,60 +1420,60 @@ void update_blue() {
     for (i.x = 0; i.x < BOARD_WIDTH; ++i.x) {
       flow_here = BLUE_FLOW[i.idx()];
       if (
-         BOARD[i.neighbor(DOWN).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(DOWN).idx()] < 1.0
+         BOARD[i.neighbor(DIR_DOWN).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_DOWN).idx()] < 1.0
       ) {
         // liquid can continue to flow downwards next step: no need to spread
         continue;
       }
       if ( // flow left but not right
-         BOARD[i.neighbor(LEFT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(LEFT).idx()] < flow_here
+         BOARD[i.neighbor(DIR_LEFT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_LEFT).idx()] < flow_here
       && (
-            BOARD[i.neighbor(RIGHT).idx()] > TILE_WATER
-         || BLUE_FLOW[i.neighbor(RIGHT).idx()] >= flow_here
+            BOARD[i.neighbor(DIR_RIGHT).idx()] > TILE_WATER
+         || BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()] >= flow_here
          )
       ) {
-        balance_level = (flow_here + BLUE_FLOW[i.neighbor(LEFT).idx()]) / 2.0;
+        balance_level = (flow_here+BLUE_FLOW[i.neighbor(DIR_LEFT).idx()]) / 2.0;
         FLUX[i.idx()] += FLOW_BALANCING_SPEED * (balance_level - flow_here);
-        FLUX[i.neighbor(LEFT).idx()] += FLOW_BALANCING_SPEED * (
+        FLUX[i.neighbor(DIR_LEFT).idx()] += FLOW_BALANCING_SPEED * (
           flow_here
         - balance_level
         );
       } else if ( // flow right but not left
-         BOARD[i.neighbor(RIGHT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(RIGHT).idx()] < flow_here
+         BOARD[i.neighbor(DIR_RIGHT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()] < flow_here
       && (
-            BOARD[i.neighbor(LEFT).idx()] > TILE_WATER
-         || BLUE_FLOW[i.neighbor(LEFT).idx()] >= flow_here
+            BOARD[i.neighbor(DIR_LEFT).idx()] > TILE_WATER
+         || BLUE_FLOW[i.neighbor(DIR_LEFT).idx()] >= flow_here
          )
       ) {
-        balance_level = (flow_here + BLUE_FLOW[i.neighbor(RIGHT).idx()]) / 2.0;
+        balance_level = (flow_here+BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()]) /2.0;
         FLUX[i.idx()] += FLOW_BALANCING_SPEED * (balance_level - flow_here);
-        FLUX[i.neighbor(RIGHT).idx()] += FLOW_BALANCING_SPEED * (
+        FLUX[i.neighbor(DIR_RIGHT).idx()] += FLOW_BALANCING_SPEED * (
           flow_here
         - balance_level
         );
       } else if ( // flow both left and right
-         BOARD[i.neighbor(RIGHT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(RIGHT).idx()] < flow_here
-      && BOARD[i.neighbor(LEFT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(LEFT).idx()] < flow_here
+         BOARD[i.neighbor(DIR_RIGHT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()] < flow_here
+      && BOARD[i.neighbor(DIR_LEFT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_LEFT).idx()] < flow_here
       ) {
         surplus = flow_here - (
           flow_here
-        + BLUE_FLOW[i.neighbor(LEFT).idx()]
-        + BLUE_FLOW[i.neighbor(RIGHT).idx()]
+        + BLUE_FLOW[i.neighbor(DIR_LEFT).idx()]
+        + BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()]
         ) / 3.0;
-        surplus_left = flow_here - BLUE_FLOW[i.neighbor(LEFT).idx()];
-        surplus_right = flow_here - BLUE_FLOW[i.neighbor(RIGHT).idx()];
+        surplus_left = flow_here - BLUE_FLOW[i.neighbor(DIR_LEFT).idx()];
+        surplus_right = flow_here - BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()];
         FLUX[i.idx()] -= surplus * FLOW_BALANCING_SPEED;
-        FLUX[i.neighbor(LEFT).idx()] += (
+        FLUX[i.neighbor(DIR_LEFT).idx()] += (
           surplus
         * FLOW_BALANCING_SPEED
         * (surplus_left / (surplus_left + surplus_right))
         );
-        FLUX[i.neighbor(RIGHT).idx()] += (
+        FLUX[i.neighbor(DIR_RIGHT).idx()] += (
           surplus
         * FLOW_BALANCING_SPEED
         * (surplus_right / (surplus_left + surplus_right))
@@ -1015,19 +1492,19 @@ void update_blue() {
     for (i.x = 0; i.x < BOARD_WIDTH; ++i.x) {
       flow_here = BLUE_FLOW[i.idx()];
       surplus = flow_here - 1.0;
-      if (BOARD[i.neighbor(UP).idx()] <= TILE_WATER && surplus > 0) {
+      if (BOARD[i.neighbor(DIR_UP).idx()] <= TILE_WATER && surplus > 0) {
         space_above = (
           1.0
         + ((flow_here - 1.0) * 0.5)
-        - BLUE_FLOW[i.neighbor(UP).idx()]
+        - BLUE_FLOW[i.neighbor(DIR_UP).idx()]
         );
         if (space_above > 0) {
           if (space_above < surplus) {
             FLUX[i.idx()] -= space_above;
-            FLUX[i.neighbor(UP).idx()] += space_above;
+            FLUX[i.neighbor(DIR_UP).idx()] += space_above;
           } else {
             FLUX[i.idx()] -= surplus;
-            FLUX[i.neighbor(UP).idx()] += surplus;
+            FLUX[i.neighbor(DIR_UP).idx()] += surplus;
           }
         }
       }
@@ -1045,60 +1522,60 @@ void update_blue() {
     for (i.x = 0; i.x < BOARD_WIDTH; ++i.x) {
       flow_here = BLUE_FLOW[i.idx()];
       if (
-         BOARD[i.neighbor(DOWN).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(DOWN).idx()] < 1.0
+         BOARD[i.neighbor(DIR_DOWN).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_DOWN).idx()] < 1.0
       ) {
         // liquid can continue to flow downwards next step: no need to spread
         continue;
       }
       if ( // flow left but not right
-         BOARD[i.neighbor(LEFT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(LEFT).idx()] < flow_here
+         BOARD[i.neighbor(DIR_LEFT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_LEFT).idx()] < flow_here
       && (
-            BOARD[i.neighbor(RIGHT).idx()] > TILE_WATER
-         || BLUE_FLOW[i.neighbor(RIGHT).idx()] >= flow_here
+            BOARD[i.neighbor(DIR_RIGHT).idx()] > TILE_WATER
+         || BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()] >= flow_here
          )
       ) {
-        balance_level = (flow_here + BLUE_FLOW[i.neighbor(LEFT).idx()]) / 2.0;
+        balance_level = (flow_here+BLUE_FLOW[i.neighbor(DIR_LEFT).idx()]) / 2.0;
         FLUX[i.idx()] += FLOW_BALANCING_SPEED * (balance_level - flow_here);
-        FLUX[i.neighbor(LEFT).idx()] += FLOW_BALANCING_SPEED * (
+        FLUX[i.neighbor(DIR_LEFT).idx()] += FLOW_BALANCING_SPEED * (
           flow_here
         - balance_level
         );
       } else if ( // flow right but not left
-         BOARD[i.neighbor(RIGHT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(RIGHT).idx()] < flow_here
+         BOARD[i.neighbor(DIR_RIGHT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()] < flow_here
       && (
-            BOARD[i.neighbor(LEFT).idx()] > TILE_WATER
-         || BLUE_FLOW[i.neighbor(LEFT).idx()] >= flow_here
+            BOARD[i.neighbor(DIR_LEFT).idx()] > TILE_WATER
+         || BLUE_FLOW[i.neighbor(DIR_LEFT).idx()] >= flow_here
          )
       ) {
-        balance_level = (flow_here + BLUE_FLOW[i.neighbor(RIGHT).idx()]) / 2.0;
+        balance_level = (flow_here+BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()]) /2.0;
         FLUX[i.idx()] += FLOW_BALANCING_SPEED * (balance_level - flow_here);
-        FLUX[i.neighbor(RIGHT).idx()] += FLOW_BALANCING_SPEED * (
+        FLUX[i.neighbor(DIR_RIGHT).idx()] += FLOW_BALANCING_SPEED * (
           flow_here
         - balance_level
         );
       } else if ( // flow both left and right
-         BOARD[i.neighbor(RIGHT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(RIGHT).idx()] < flow_here
-      && BOARD[i.neighbor(LEFT).idx()] <= TILE_WATER
-      && BLUE_FLOW[i.neighbor(LEFT).idx()] < flow_here
+         BOARD[i.neighbor(DIR_RIGHT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()] < flow_here
+      && BOARD[i.neighbor(DIR_LEFT).idx()] <= TILE_WATER
+      && BLUE_FLOW[i.neighbor(DIR_LEFT).idx()] < flow_here
       ) {
         surplus = flow_here - (
           flow_here
-        + BLUE_FLOW[i.neighbor(LEFT).idx()]
-        + BLUE_FLOW[i.neighbor(RIGHT).idx()]
+        + BLUE_FLOW[i.neighbor(DIR_LEFT).idx()]
+        + BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()]
         ) / 3.0;
-        surplus_left = flow_here - BLUE_FLOW[i.neighbor(LEFT).idx()];
-        surplus_right = flow_here - BLUE_FLOW[i.neighbor(RIGHT).idx()];
+        surplus_left = flow_here - BLUE_FLOW[i.neighbor(DIR_LEFT).idx()];
+        surplus_right = flow_here - BLUE_FLOW[i.neighbor(DIR_RIGHT).idx()];
         FLUX[i.idx()] -= surplus * FLOW_BALANCING_SPEED;
-        FLUX[i.neighbor(LEFT).idx()] += (
+        FLUX[i.neighbor(DIR_LEFT).idx()] += (
           surplus
         * FLOW_BALANCING_SPEED
         * (surplus_left / (surplus_left + surplus_right))
         );
-        FLUX[i.neighbor(RIGHT).idx()] += (
+        FLUX[i.neighbor(DIR_RIGHT).idx()] += (
           surplus
         * FLOW_BALANCING_SPEED
         * (surplus_right / (surplus_left + surplus_right))
@@ -1133,16 +1610,16 @@ void update_blue() {
   swap_from_next();
 }
 
-void grow_green() {
+void grow_vines() {
   Index i = new Index(0, 0);
   clone_to_next();
   for (i.x = 0; i.x < BOARD_WIDTH; ++i.x) {
     for (i.y = 0; i.y < BOARD_HEIGHT; ++i.y) {
       if (BOARD[i.idx()] == TILE_VINES && any_touching(i, TILE_WATER)) {
-        set_next(i.neighbor(UP), TILE_VINES);
-        set_next(i.neighbor(RIGHT), TILE_VINES);
-        set_next(i.neighbor(DOWN), TILE_VINES);
-        set_next(i.neighbor(LEFT), TILE_VINES);
+        set_next(i.neighbor(DIR_UP), TILE_VINES);
+        set_next(i.neighbor(DIR_RIGHT), TILE_VINES);
+        set_next(i.neighbor(DIR_DOWN), TILE_VINES);
+        set_next(i.neighbor(DIR_LEFT), TILE_VINES);
       }
     }
   }
@@ -1188,6 +1665,8 @@ void generate_level() {
 
 void place_agent_in_level(Agent a) {
   // TODO: Something more sophisticated!
+  a.x = random(BOARD_WIDTH);
+  a.y = random(BOARD_HEIGHT);
   while (a.movement_on(BOARD[a.center().idx()]) == MOV_BLOCKED) {
     a.x = random(BOARD_WIDTH);
     a.y = random(BOARD_HEIGHT);
@@ -1230,7 +1709,14 @@ void setup() {
   generate_level();
 
   // The agent:
-  LOST = new Agent(BOARD_WIDTH / 2.0, BOARD_HEIGHT / 2.0, 0.3, AI_NONE);
+  LOST = new Agent(
+    BOARD_WIDTH / 2.0, // x
+    BOARD_HEIGHT / 2.0, // y
+    DEFAULT_MAX_SPEED, // max_speed
+    DEFAULT_SIZE, // size
+    AI_FOLLOW_CURSOR // AI
+    // AI_PLAYER_CONTROLLED // AI
+  );
   place_agent_in_level(LOST);
 }
 
@@ -1269,7 +1755,11 @@ void draw_board() {
 void draw_agent(Agent a) {
   // TODO: Something fancier!
   stroke(0, 0, 0);
-  fill(0, 0, 1);
+  if (a.supported(DIR_DOWN)) {
+    fill(0, 0, 1);
+  } else {
+    fill(0, 0, 0.9);
+  }
   ellipse(
     (float) (a.x * TILE_SIZE),
     (float) (a.y * TILE_SIZE),
@@ -1296,12 +1786,43 @@ void draw_path(ArrayList<PathIndex> path) {
   }
 }
 
-void debug_cursor() {
+void debug_flow() {
   fill(0, 0, 1);
   text(
     String.format("%.12f", BLUE_FLOW[mouse_index().idx()]),
     20,
     20
+  );
+}
+
+void debug_framerate() {
+  fill(0, 0, 1);
+  text(
+    String.format("framerate: %.2f", REAL_FRAMERATE),
+    width - 160,
+    20
+  );
+}
+
+void debug_input() {
+  fill(0, 0, 1);
+  text(
+    String.format("INPUT: %x", PLAYER_STEERING),
+    20,
+    60
+  );
+}
+
+void debug_lost() {
+  text(
+    String.format("heading: %.3f", LOST.heading),
+    20,
+    100
+  );
+  text(
+    String.format("speed: %.3f", LOST.speed),
+    20,
+    120
   );
 }
 
@@ -1313,6 +1834,18 @@ void draw() {
   stroke(0.0, 0.0, 1.0);
   noFill();
 
+  // Count frames:
+  if (TIME_ELAPSED > 0.5) {
+    REAL_FRAMERATE = FRAME_COUNT / (float) (TIME_ELAPSED / 1000.0);
+    TIME_ELAPSED = 0;
+    FRAME_COUNT = 0;
+  } else {
+    FRAME_COUNT += 1;
+    TIME_ELAPSED += millis() - LAST_TIME;
+  }
+  LAST_TIME = millis();
+
+
   // Draw:
   int board_px_width = TILE_SIZE * BOARD_WIDTH;
   int board_px_height = TILE_SIZE * BOARD_HEIGHT;
@@ -1320,7 +1853,8 @@ void draw() {
   translate((width - board_px_width) / 2, (height - board_px_height) / 2);
   draw_board();
   draw_agent(LOST);
-  path = LOST.path_to(mouse_index());
+  //*
+  path = LOST.current_path;
   if (path != null) {
     draw_path(path);
   } else {
@@ -1335,14 +1869,19 @@ void draw() {
       (float) (LOST.x + 0.5) * TILE_SIZE, (float) (LOST.y - 0.5) * TILE_SIZE
     );
   }
+  /* */
   popMatrix();
 
-  debug_cursor();
+  debug_flow();
+  debug_framerate();
+  debug_input();
+  debug_lost();
 
   // Update:
   if (!PAUSED && frameCount % UPDATE_RATE == 0) {
-    update_blue();
-    grow_green();
+    update_water();
+    grow_vines();
+    LOST.update(1.0 / (float) FRAME_RATE);
   }
 }
 
@@ -1351,11 +1890,37 @@ void keyPressed() {
     exit();
   } else if (key == 'r') {
     generate_level();
-  } else if (key == ' ') {
+    place_agent_in_level(LOST);
+  } else if (key == 'p') {
     PAUSED = !PAUSED;
   } else if (key == 's') {
-    update_blue();
-    grow_green();
-  // TODO: other keys...
+    update_water();
+    grow_vines();
+  } else if (key == ' ') {
+    PLAYER_DO_JUMP = true;
+  } else if (key == CODED) {
+    if (keyCode == UP) {
+      PLAYER_STEERING |= DIR_UP;
+    } else if (keyCode == RIGHT) {
+      PLAYER_STEERING |= DIR_RIGHT;
+    } else if (keyCode == DOWN) {
+      PLAYER_STEERING |= DIR_DOWN;
+    } else if (keyCode == LEFT) {
+      PLAYER_STEERING |= DIR_LEFT;
+    }
+  }
+}
+
+void keyReleased() {
+  if (key == CODED) {
+    if (keyCode == UP) {
+      PLAYER_STEERING &= ~DIR_UP;
+    } else if (keyCode == RIGHT) {
+      PLAYER_STEERING &= ~DIR_RIGHT;
+    } else if (keyCode == DOWN) {
+      PLAYER_STEERING &= ~DIR_DOWN;
+    } else if (keyCode == LEFT) {
+      PLAYER_STEERING &= ~DIR_LEFT;
+    }
   }
 }
