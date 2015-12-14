@@ -1,2 +1,0 @@
-applet=perlin.jar
-application=perlin.jar

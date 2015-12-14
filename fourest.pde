@@ -2,10 +2,6 @@
 
 import java.util.Collections;
 
-import perlin.*;
-
-Perlin pnl = new Perlin(this);
-
 int INITIAL_SETTLE_TIME = 1000;
 
 int NEARBY_RANGE = 23;
@@ -139,21 +135,24 @@ int AI_PLAYER_CONTROLLED = 6;
 int EMOTE_CONFUSED = 0;
 int EMOTE_CELEBRATE = 1;
 int EMOTE_EXPLORE = 2;
-int EMOTE_GET_FINS = 3;
-int EMOTE_GET_ROPE = 4;
-int EMOTE_GET_BUCKET = 5;
-int EMOTE_GET_SATCHEL = 6;
-int EMOTE_GET_SHOVEL = 7;
-int EMOTE_GET_PICK = 8;
-int EMOTE_GET_TORCH = 9;
-int EMOTE_GET_KEY = 10;
-int EMOTE_SEEK_ENTRANCE = 11;
-int EMOTE_SEEK_EXIT = 12;
-int EMOTE_TILE_WATER = 13;
-int EMOTE_TILE_DIRT = 14;
-int EMOTE_TILE_VINE = 15;
-int EMOTE_TILE_STONE = 16;
-int EMOTE_TILE_WALL = 17;
+int EMOTE_WANDER = 3;
+int EMOTE_FOLLOW = 4;
+int EMOTE_CONTROLLED = 5;
+int EMOTE_GET_FINS = 6;
+int EMOTE_GET_ROPE = 7;
+int EMOTE_GET_BUCKET = 8;
+int EMOTE_GET_SATCHEL = 9;
+int EMOTE_GET_SHOVEL = 10;
+int EMOTE_GET_PICK = 11;
+int EMOTE_GET_TORCH = 12;
+int EMOTE_GET_KEY = 13;
+int EMOTE_SEEK_ENTRANCE = 14;
+int EMOTE_SEEK_EXIT = 15;
+int EMOTE_TILE_WATER = 16;
+int EMOTE_TILE_DIRT = 17;
+int EMOTE_TILE_VINE = 18;
+int EMOTE_TILE_STONE = 19;
+int EMOTE_TILE_WALL = 20;
 
 int TASK_NONE = 0;
 int TASK_DECIDE_NEXT_TASK = 1;
@@ -221,23 +220,6 @@ boolean PLAYER_USE_POWER = false;
 
 boolean DO_CLIMB_UP = false;
 boolean DO_CLIMB_DOWN = false;
-
-float pnoise(float x, float y) {
-  float[] xy = new float[2];
-  xy[0] = x;
-  xy[1] = y;
-  return pnl.noise2(xy);
-}
-
-float pnoise(float x, float y, float z) {
-  float[] xyz = new float[3];
-  xyz[0] = x;
-  xyz[1] = y;
-  xyz[2] = z;
-  float result = pnl.noise3(xyz);
-  if (result < -1.0 || result > 1.0) { println("Bad result: ", result); }
-  return result;
-}
 
 float sigmoid(float x) {
   // Takes an input between 0 and 1 and smoothes it towards the extremes a bit,
@@ -2572,7 +2554,7 @@ class Agent {
         this.current_goal = null;
         // keep wandering to a new destination...
       }
-      this.current_emote = EMOTE_EXPLORE;
+      this.current_emote = EMOTE_WANDER;
       return TASK_WANDER;
     }
     // fallback:
@@ -2600,6 +2582,7 @@ class Agent {
         this.heading = atan2(d_vy, d_vx);
         this.speed = this.max_speed;
       }
+      this.current_emote = EMOTE_CONTROLLED;
     } else if (this.AI == AI_FOLLOW_CURSOR) {
       this.current_goal = mouse_index();
 
@@ -2608,6 +2591,7 @@ class Agent {
       }
 
       do_jump = this.follow_path_with_pauses();
+      this.current_emote = EMOTE_FOLLOW;
     } else if (this.AI == AI_EXPLORE_TILES) {
       int desired_tile;
       if (this.almost_at_goal()) {
@@ -3906,9 +3890,8 @@ void setup() {
   WINDOW_WIDTH = 800;
   WINDOW_HEIGHT = 600;
 
-  randomSeed(23);
+  randomSeed(27);
   noiseSeed(17);
-  // TODO: some way of seeding the Perlin library?
 
   colorMode(HSB, 1.0, 1.0, 1.0, 1.0);
 
@@ -4166,9 +4149,12 @@ void draw_help() {
   if (LOST.AI == AI_PLAYER_CONTROLLED) {
     text("SPACE -- jump", 0, 270);
     text("UP, DOWN, LEFT, RIGHT -- move", 0, 300);
+    text("e -- enter doorway", 0, 330);
   } else if (LOST.AI == AI_FOLLOW_CURSOR) {
     text("<mouse> -- set destination", 0, 270);
   }
+
+  text("note: see README.txt for more info", 0, 400);
 }
 
 void draw_agent(Agent a, int t) {
@@ -4267,6 +4253,36 @@ void draw_agent(Agent a, int t) {
     stroke(0, 0, 0.4);
     fill(0, 0, 0);
     text("O_O", 0, 0);
+    strokeWeight(1);
+    popMatrix();
+  } else if (a.current_emote == EMOTE_WANDER) {
+    pushMatrix();
+    translate(-1.5*s + -0.1*s*cos(2*ft*2*PI), 3.0*s);
+    scale(0.9);
+    strokeWeight(2);
+    stroke(0, 0, 0.4);
+    fill(0, 0, 0);
+    text("@_@", 0, 0);
+    strokeWeight(1);
+    popMatrix();
+  } else if (a.current_emote == EMOTE_FOLLOW) {
+    pushMatrix();
+    translate(-1.5*s + -0.1*s*cos(2*ft*2*PI), 3.0*s);
+    scale(0.9);
+    strokeWeight(2);
+    stroke(0, 0, 0.4);
+    fill(0, 0, 0);
+    text("***", 0, 0);
+    strokeWeight(1);
+    popMatrix();
+  } else if (a.current_emote == EMOTE_CONTROLLED) {
+    pushMatrix();
+    translate(-1.5*s + -0.1*s*cos(2*ft*2*PI), 3.0*s);
+    scale(0.9);
+    strokeWeight(2);
+    stroke(0, 0, 0.4);
+    fill(0, 0, 0);
+    text("<->", 0, 0);
     strokeWeight(1);
     popMatrix();
   } else if (a.current_emote == EMOTE_GET_FINS) {
@@ -4396,6 +4412,7 @@ void debug_lost() {
 
 void draw() {
   ArrayList<PathIndex> path;
+  PathIndex p;
   // Reset:
   background(0.6, 0.8, 0.25);
   stroke(0.0, 0.0, 1.0);
@@ -4416,6 +4433,7 @@ void draw() {
   // Draw:
   int board_px_width = TILE_SIZE * current_level().width;
   int board_px_height = TILE_SIZE * current_level().height;
+
   pushMatrix();
   translate((width - board_px_width) / 2, (height - board_px_height) / 2);
   current_level().draw_tiles();
@@ -4438,6 +4456,20 @@ void draw() {
   popMatrix();
 
 
+  if (LOST.AI == AI_FOLLOW_CURSOR) {
+    path = LOST.current_path;
+    p = null;
+    if (path != null && path.size() > 0) {
+      p = path.get(path.size() - 1);
+    }
+    if (p != null) {
+      strokeWeight(2);
+      stroke(0, 0, 1, 0.5);
+      noFill();
+      rect(p.x * TILE_SIZE, p.y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+      strokeWeight(1);
+    }
+  }
   /*
   // DEBUG DRAW PATH:
   path = LOST.current_path;
