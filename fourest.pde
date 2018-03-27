@@ -76,8 +76,10 @@ color TILES[];
 
 //int BOARD_WIDTH = 128;
 //int BOARD_HEIGHT = 128;
-int BOARD_WIDTH = 52;
-int BOARD_HEIGHT = 52;
+//int BOARD_WIDTH = 52;
+//int BOARD_HEIGHT = 52;
+int BOARD_WIDTH = 42;
+int BOARD_HEIGHT = 42;
 //int BOARD_WIDTH = 8;
 //int BOARD_HEIGHT = 8;
 
@@ -3881,14 +3883,14 @@ void generate_level(Level l, Agent hero, boolean locked) {
 }
 
 void setup() {
-  size(800, 600, P2D);
+  size(1280, 900, P2D);
   frameRate(FRAME_RATE);
   textSize(TEXT_SIZE);
 
   ellipseMode(RADIUS);
 
-  WINDOW_WIDTH = 800;
-  WINDOW_HEIGHT = 600;
+  WINDOW_WIDTH = 1280;
+  WINDOW_HEIGHT = 900;
 
   randomSeed(27);
   noiseSeed(17);
@@ -4143,7 +4145,7 @@ void draw_help() {
 
   text("q -- quit", 0, 120);
   text("p -- pause", 0, 150);
-  text("r -- reset the level", 0, 180);
+  text("r -- reset the game", 0, 180);
   text("TAB -- switch AI mode", 0, 210);
 
   if (LOST.AI == AI_PLAYER_CONTROLLED) {
@@ -4154,7 +4156,7 @@ void draw_help() {
     text("<mouse> -- set destination", 0, 270);
   }
 
-  text("note: see README.txt for more info", 0, 400);
+  text("see README.txt for more info", -20, 400);
 }
 
 void draw_agent(Agent a, int t) {
@@ -4435,7 +4437,7 @@ void draw() {
   int board_px_height = TILE_SIZE * current_level().height;
 
   pushMatrix();
-  translate((width - board_px_width) / 2, (height - board_px_height) / 2);
+  translate((width - board_px_width) / 2 - 40, (height - board_px_height) / 2);
   current_level().draw_tiles();
   current_level().draw_powerups(frameCount);
   current_level().draw_shroud();
